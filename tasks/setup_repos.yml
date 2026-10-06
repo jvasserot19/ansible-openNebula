@@ -1,0 +1,18 @@
+- name: Archive default vendor repositories
+  ansible.builtin.shell: |
+    mkdir -p /etc/yum.repos.d/backup
+    mv -f /etc/yum.repos.d/*.repo /etc/yum.repos.d/backup/ 2>/dev/null || true
+  args:
+    creates: /etc/yum.repos.d/backup
+
+- name: Deploy internal repository configuration
+  ansible.builtin.template:
+    src: templates/internal.repo.j2
+    dest: /etc/yum.repos.d/internal.repo
+    owner: root
+    group: root
+    mode: '0644'
+
+- name: Refresh DNF package cache
+  ansible.builtin.dnf:
+    makecache: true

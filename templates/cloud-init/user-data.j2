@@ -1,0 +1,15 @@
+#cloud-config
+users:
+  - name: root
+    ssh_authorized_keys:
+      - {{ admin_ssh_pubkey }}
+disable_root: false
+ssh_pwauth: true
+chpasswd:
+  list: |
+    root:{{ vault_initial_root_password | default('AdminInitialPass123!') }}
+  expire: false
+growpart:
+  mode: auto
+  devices: ['/']
+package_upgrade: false

@@ -1,0 +1,44 @@
+---
+- name: Ensure oneadmin user is in kvm and qemu groups
+  ansible.builtin.user:
+    name: oneadmin
+    groups:
+      - kvm
+      - qemu
+    append: true
+
+- name: Enforce oneadmin user and group in /etc/libvirt/qemu.conf
+  ansible.builtin.lineinfile:
+    path: /etc/libvirt/qemu.conf
+    regexp: '^#?{{ item.key }}\s*='
+    line: '{{ item.key }} = "{{ item.value }}"'
+    state: present
+  loop:
+    - { key: 'user', value: 'oneadmin' }
+    - { key: 'group', value: 'oneadmin' }
+  notify: Restart Libvirt
+
+- name: Disable dynamic ownership in /etc/libvirt/qemu.conf
+  ansible.builtin.lineinfile:
+    path: /etc/libvirt/qemu.conf
+    regexp: '^#?dynamic_ownership\s*='
+    line: 'dynamic_ownership = 0'
+    state: present
+  notify: Restart Libvirt
+
+- name: Fix permissions on local libvirt runtime directories for oneadmin
+  ansible.builtin.file:
+    path: "{{ item }}"
+    owner: oneadmin
+    group: oneadmin
+    mode: '0750'
+    state: directory
+  loop:
+    - /var/lib/libvirt/qemu
+    - /var/cache/libvirt/qemu
+    - /var/log/libvirt/qemu
+
+- name: Restart and verify libvirtd/virtqemud service
+  ansible.builtin.service:
+    name: libvirtd
+    state: restarted

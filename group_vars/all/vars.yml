@@ -1,0 +1,71 @@
+---
+# =============================================================================
+# OpenNebula Cluster Core Configuration
+# =============================================================================
+ansible_user: "root"
+one_cluster_name: "default"
+one_ha_vip: "10.4.16.10"
+one_active_frontend: "fe01.internal.lan"
+
+# Credentials (Plaintext for now; migrate to Vault later)
+one_auth_token: "oneadmin:SecretClusterPass123"
+
+# =============================================================================
+# Database (MariaDB & Galera) Configuration
+# =============================================================================
+db_host: "127.0.0.1"
+db_name: "opennebula"
+db_user: "oneadmin"
+db_password: "SecretClusterPass123"
+
+galera_cluster_name: "one_galera_cluster"
+galera_cluster_ips: "{{ groups['one_frontends'] | map('extract', hostvars, 'ansible_host') | join(',') }}"
+
+# =============================================================================
+# Internal Airgapped Network & Mirror Endpoints
+# =============================================================================
+internal_repo_base_url: "http://10.4.16.21/repos/baseos"
+internal_opennebula_repo_url: "http://10.4.16.21/repos/opennebula"
+internal_ntp_server: "10.4.16.21"
+
+# =============================================================================
+# Shared NFS Datastore Configuration
+# =============================================================================
+nfs_server_ip: "10.4.16.21"
+nfs_export_path: "/data/datastores"
+nfs_mount_target: "/var/lib/one/datastores"
+nfs_mount_options: "rw,sync,hard,intr,noatime"
+
+# Backwards-compatible aliases for legacy tasks
+shared_datastore_nfs: "{{ nfs_server_ip }}:{{ nfs_export_path }}"
+datastore_mount_point: "{{ nfs_mount_target }}"
+
+# =============================================================================
+# OpenNebula Virtual Networks (OVN & OVS)
+# =============================================================================
+opennebula_vnets:
+  - name: "Tenant-OVN-VXLAN"
+    vn_mad: "ovn"
+    bridge: "br-int"
+    phydev: "eth0"
+    auto_vlan: "YES"
+    net_address: "192.168.100.0"
+    net_mask: "255.255.255.0"
+    gateway: "192.168.100.1"
+    dns: "10.4.16.21"
+    ar_type: "IP4"
+    ar_ip: "192.168.100.10"
+    ar_size: 100
+
+  - name: "Tenant-OVS-VXLAN"
+    vn_mad: "ovswitch"
+    bridge: "ovsbr0"
+    phydev: "eth0"
+    vlan_id: 200
+    net_address: "172.16.20.0"
+    net_mask: "255.255.255.0"
+    gateway: "172.16.20.1"
+    dns: "10.4.16.21"
+    ar_type: "IP4"
+    ar_ip: "172.16.20.10"
+    ar_size: 50

@@ -1,0 +1,28 @@
+---
+- name: Install OVN central components on frontends
+  ansible.builtin.dnf:
+    name:
+      - ovn-central
+    state: present
+
+- name: Configure firewalld for OVN Northbound and Southbound databases
+  ansible.posix.firewalld:
+    port: "{{ item }}"
+    permanent: true
+    state: enabled
+    immediate: true
+  loop:
+    - "6641/tcp"  # OVN Northbound DB
+    - "6642/tcp"  # OVN Southbound DB
+  ignore_errors: true
+
+- name: Start and enable OVN central service
+  ansible.builtin.service:
+    name: ovn-northd
+    state: started
+    enabled: true
+
+- name: Configure OVN Southbound DB to listen on TCP
+  ansible.builtin.command: |
+    ovn-sbctl set-connection ptcp:6642:0.0.0.0
+  changed_when: false

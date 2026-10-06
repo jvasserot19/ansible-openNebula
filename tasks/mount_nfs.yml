@@ -1,0 +1,29 @@
+---
+- name: Install NFS client utilities
+  ansible.builtin.dnf:
+    name: nfs-utils
+    state: present
+
+- name: Ensure target datastore mount directory exists
+  ansible.builtin.file:
+    path: "{{ nfs_mount_target }}"
+    state: directory
+    owner: oneadmin
+    group: oneadmin
+    mode: '0755'
+
+- name: Mount shared NFS datastore to /var/lib/one/datastores and update fstab
+  ansible.posix.mount:
+    path: "{{ nfs_mount_target }}"
+    src: "{{ nfs_server_ip }}:{{ nfs_export_path }}"
+    fstype: nfs
+    opts: "{{ nfs_mount_options }}"
+    state: mounted
+
+- name: Enforce oneadmin ownership on mounted datastore directory
+  ansible.builtin.file:
+    path: "{{ nfs_mount_target }}"
+    state: directory
+    owner: oneadmin
+    group: oneadmin
+    recurse: false

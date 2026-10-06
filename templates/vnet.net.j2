@@ -1,0 +1,24 @@
+NAME   = "{{ item.name }}"
+VN_MAD = "{{ item.vn_mad }}"
+BRIDGE = "{{ item.bridge }}"
+PHYDEV = "{{ item.phydev }}"
+
+{% if item.auto_vlan is defined %}
+AUTOMATIC_VLAN_ID = "{{ item.auto_vlan }}"
+{% endif %}
+{% if item.vlan_id is defined %}
+VLAN_ID = "{{ item.vlan_id }}"
+{% endif %}
+
+# IP & Routing Configuration
+NETWORK_ADDRESS = "{{ item.net_address }}"
+NETWORK_MASK    = "{{ item.net_mask }}"
+GATEWAY         = "{{ item.gateway }}"
+DNS             = "{{ item.dns }}"
+
+# Address Range (AR) Pool
+AR = [
+    TYPE = "{{ item.ar_type }}",
+    IP   = "{{ item.ar_ip }}",
+    SIZE = "{{ item.ar_size }}"
+]

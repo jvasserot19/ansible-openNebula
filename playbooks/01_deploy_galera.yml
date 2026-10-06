@@ -1,0 +1,124 @@
+---
+- name: Deploy and Bootstrap 3-Node MariaDB Galera Cluster
+  hosts: one_frontends
+  gather_facts: true
+  tasks:
+
+    # -------------------------------------------------------------------------
+    # 1. Package Installation & Prerequisites
+    # -------------------------------------------------------------------------
+    - name: Apply airgapped repository configuration
+      ansible.builtin.include_tasks: tasks/setup_repos.yml
+
+    - name: Install MariaDB Server, Galera, and Python dependencies
+      ansible.builtin.dnf:
+        name:
+          - mariadb-server
+          - mariadb
+          - galera
+          - rsync
+          - python3-PyMySQL
+        state: present
+
+    - name: Allow Galera cluster operations in SELinux
+      ansible.posix.seboolean:
+        name: daemons_enable_cluster_mode
+        state: true
+        persistent: true
+      ignore_errors: true
+
+    - name: Open Galera and MySQL ports in firewalld
+      ansible.posix.firewalld:
+        port: "{{ item }}"
+        permanent: true
+        state: enabled
+        immediate: true
+      loop:
+        - "3306/tcp"   # MySQL client connections
+        - "4567/tcp"   # Galera cluster replication
+        - "4567/udp"   # Galera multicast replication
+        - "4568/tcp"   # IST (Incremental State Transfer)
+        - "4444/tcp"   # SST (State Snapshot Transfer)
+      ignore_errors: true
+
+    # -------------------------------------------------------------------------
+    # 2. Deploy Configuration
+    # -------------------------------------------------------------------------
+    - name: Deploy Galera configuration with correct .cnf extension
+      ansible.builtin.template:
+        src: templates/galera.cnf.j2
+        dest: /etc/my.cnf.d/galera.cnf
+        owner: root
+        group: root
+        mode: '0644'
+
+    # -------------------------------------------------------------------------
+    # 3. Idempotent Bootstrap & Service Management
+    # -------------------------------------------------------------------------
+    - name: Check if Galera cluster is already running on any node
+      ansible.builtin.command: mysql -u root -e "SHOW STATUS LIKE 'wsrep_cluster_size';"
+      register: wsrep_status
+      failed_when: false
+      changed_when: false
+      run_once: true
+      delegate_to: "{{ groups['one_frontends'][0] }}"
+
+    - name: Bootstrap new Galera cluster on the primary node (fe01)
+      ansible.builtin.command: galera_new_cluster
+      when: 
+        - inventory_hostname == groups['one_frontends'][0]
+        - wsrep_status.rc != 0
+      run_once: true
+
+    - name: Start MariaDB on remaining nodes sequentially
+      ansible.builtin.service:
+        name: mariadb
+        state: started
+        enabled: true
+      when: 
+        - inventory_hostname != groups['one_frontends'][0]
+        - wsrep_status.rc != 0
+      throttle: 1
+
+    - name: Ensure MariaDB service is running and enabled on all nodes
+      ansible.builtin.service:
+        name: mariadb
+        state: started
+        enabled: true
+
+    # -------------------------------------------------------------------------
+    # 4. OpenNebula Database & User Provisioning
+    # -------------------------------------------------------------------------
+    - name: Create OpenNebula database
+      community.mysql.mysql_db:
+        name: opennebula
+        state: present
+        login_unix_socket: /var/lib/mysql/mysql.sock
+      run_once: true
+      delegate_to: "{{ groups['one_frontends'][0] }}"
+
+    - name: Create oneadmin user with privileges for local loopback and cluster
+      community.mysql.mysql_user:
+        name: "{{ db_user }}"
+        password: "{{ db_password }}"
+        priv: "opennebula.*:ALL"
+        host: "{{ item }}"
+        state: present
+        login_unix_socket: /var/lib/mysql/mysql.sock
+      loop:
+        - "localhost"
+        - "127.0.0.1"
+        - "{{ ansible_host }}"
+      run_once: true
+      delegate_to: "{{ groups['one_frontends'][0] }}"
+
+    # -------------------------------------------------------------------------
+    # 5. Cluster State Verification
+    # -------------------------------------------------------------------------
+    - name: Verify Galera cluster size equals 3
+      ansible.builtin.command: mysql -u root -e "SHOW STATUS LIKE 'wsrep_cluster_size';"
+      register: cluster_size_check
+      changed_when: false
+      failed_when: "'3' not in cluster_size_check.stdout"
+      run_once: true
+      delegate_to: "{{ groups['one_frontends'][0] }}"

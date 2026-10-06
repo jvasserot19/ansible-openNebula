@@ -1,0 +1,116 @@
+---
+- name: Prepare KVM Hosts and Provision Frontend VMs
+  hosts: baremetal_hosts
+  gather_facts: true
+  vars:
+    base_image_url: "http://10.4.16.21/images/AlmaLinux-9-GenericCloud.qcow2"
+    image_storage_dir: "/var/lib/libvirt/images"
+    admin_ssh_pubkey: "{{ lookup('file', '~/.ssh/id_rsa.pub') }}"
+
+  tasks:
+    # -------------------------------------------------------------------------
+    # 1. Hypervisor Stack Setup
+    # -------------------------------------------------------------------------
+    - name: Apply airgapped repo definitions to bare-metal hosts
+      ansible.builtin.include_tasks: ../tasks/setup_repos.yml
+
+    - name: Install KVM, Libvirt, and VM generation utilities
+      ansible.builtin.dnf:
+        name:
+          - qemu-kvm
+          - libvirt
+          - virt-install
+          - genisoimage
+          - qemu-img
+        state: present
+
+    - name: Ensure libvirtd service is active and enabled
+      ansible.builtin.service:
+        name: libvirtd
+        state: started
+        enabled: true
+
+    - name: Download base AlmaLinux 9 GenericCloud QCOW2 image
+      ansible.builtin.get_url:
+        url: "{{ base_image_url }}"
+        dest: "{{ image_storage_dir }}/AlmaLinux-9-GenericCloud-base.qcow2"
+        mode: '0644'
+        force: false
+
+    # -------------------------------------------------------------------------
+    # 2. VM Disk and Cloud-Init Generation
+    # -------------------------------------------------------------------------
+    - name: Create VM directories and Cloud-Init ISOs
+      ansible.builtin.file:
+        path: "/var/lib/libvirt/cloud-init/{{ item.name }}"
+        state: directory
+        mode: '0755'
+      loop: "{{ assigned_vms }}"
+
+    - name: Render Cloud-Init configuration files
+      ansible.builtin.template:
+        src: "../templates/cloud-init/{{ cfg.src }}"
+        dest: "/var/lib/libvirt/cloud-init/{{ item.name }}/{{ cfg.dest }}"
+        mode: '0644'
+      loop: "{{ assigned_vms | product([
+        {'src': 'user-data.j2', 'dest': 'user-data'},
+        {'src': 'meta-data.j2', 'dest': 'meta-data'},
+        {'src': 'network-config.j2', 'dest': 'network-config'}
+      ]) | list }}"
+      vars:
+        item: "{{ item[0] }}"
+        cfg: "{{ item[1] }}"
+
+    - name: Generate Cloud-Init NoCloud ISO
+      ansible.builtin.command: |
+        genisoimage -output {{ image_storage_dir }}/{{ item.name }}-cidata.iso \
+          -volid cidata -joliet -rock \
+          /var/lib/libvirt/cloud-init/{{ item.name }}/user-data \
+          /var/lib/libvirt/cloud-init/{{ item.name }}/meta-data \
+          /var/lib/libvirt/cloud-init/{{ item.name }}/network-config
+      loop: "{{ assigned_vms }}"
+      changed_when: false
+
+    - name: Create VM root disks backed by base image
+      ansible.builtin.command: |
+        qemu-img create -f qcow2 -F qcow2 \
+          -b {{ image_storage_dir }}/AlmaLinux-9-GenericCloud-base.qcow2 \
+          {{ image_storage_dir }}/{{ item.name }}.qcow2 {{ item.disk }}G
+      args:
+        creates: "{{ image_storage_dir }}/{{ item.name }}.qcow2"
+      loop: "{{ assigned_vms }}"
+
+    # -------------------------------------------------------------------------
+    # 3. Virtual Machine Creation (virt-install)
+    # -------------------------------------------------------------------------
+    - name: Query running libvirt domains
+      ansible.builtin.command: virsh list --all --name
+      register: existing_vms
+      changed_when: false
+
+    - name: Deploy Frontend VMs via virt-install
+      ansible.builtin.command: |
+        virt-install \
+          --name {{ item.name }} \
+          --memory {{ item.ram }} \
+          --vcpus {{ item.vcpus }} \
+          --disk path={{ image_storage_dir }}/{{ item.name }}.qcow2,device=disk,bus=virtio \
+          --disk path={{ image_storage_dir }}/{{ item.name }}-cidata.iso,device=cdrom \
+          --os-variant almalinux9 \
+          --network bridge={{ bridge_interface }},model=virtio \
+          --graphics none \
+          --noautoconsole \
+          --import
+      when: item.name not in existing_vms.stdout_lines
+      loop: "{{ assigned_vms }}"
+
+    # -------------------------------------------------------------------------
+    # 4. Connectivity Verification
+    # -------------------------------------------------------------------------
+    - name: Wait for SSH to become available on provisioned VMs
+      ansible.builtin.wait_for:
+        host: "{{ item.ip }}"
+        port: 22
+        state: started
+        timeout: 180
+      loop: "{{ assigned_vms }}"

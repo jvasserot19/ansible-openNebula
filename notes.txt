@@ -1,0 +1,17 @@
+4. Hypervisor Network Configurations
+Host-Level Bridge Setup
+OpenNebula's OVS/OVN drivers use an integration bridge (typically br-int) and require an uplink bridge (e.g., br-provider or br0) bound to a physical network interface for external outbound traffic.
+
+Configure an OVS bridge using NetworkManager (nmcli) on each bare-metal hypervisor:
+# 1. Create the OVS Bridge
+nmcli connection add type ovs-bridge conn.interface br-provider con-name br-provider
+
+# 2. Attach physical interface (e.g. eth1) as an OVS port/interface to the bridge
+nmcli connection add type ovs-port conn.interface ovs-port-eth1 master br-provider con-name ovs-port-eth1
+nmcli connection add type ovs-interface slave-type ovs-port conn.interface eth1 master ovs-port-eth1 con-name ovs-int-eth1
+
+# 3. Bring up the bridge
+nmcli connection up br-provider
+
+
+ovs-vsctl set open_vswitch . external_ids:ovn-bridge-mappings=provider:br-provider

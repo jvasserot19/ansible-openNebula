@@ -1,0 +1,27 @@
+module oneadmin_kvm 1.0;
+
+require {
+    type virtd_t;
+    type svirt_t;
+    type virt_image_t;
+    type user_tmp_t;
+    type user_home_t;
+    type user_home_dir_t;
+    class file { read write open getattr create unlink ioctl lock map };
+    class dir { search read open getattr write add_name remove_name };
+    class fifo_file { read write open getattr ioctl };
+    class unix_stream_socket { connectto read write };
+}
+
+# Allow virtd_t to manage oneadmin home and scratch files
+allow virtd_t user_home_t:file { read write open getattr ioctl lock };
+allow virtd_t user_home_dir_t:dir { search read open getattr };
+allow virtd_t user_tmp_t:file { read write open getattr unlink create };
+
+# Allow svirt_t (KVM VMs) access to oneadmin runtime sockets and FIFO pipes
+allow svirt_t user_home_t:file { read getattr open };
+allow svirt_t user_tmp_t:file { read write open getattr };
+allow svirt_t user_tmp_t:fifo_file { read write open getattr ioctl };
+
+# Ensure svirt_t can execute operations on virt_image_t across all storage mounts
+allow svirt_t virt_image_t:file { read write open getattr ioctl lock map };

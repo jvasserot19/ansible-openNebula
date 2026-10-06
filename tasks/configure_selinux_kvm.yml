@@ -1,0 +1,43 @@
+---
+# -----------------------------------------------------------------------------
+# Custom SELinux Type Enforcement for oneadmin KVM
+# -----------------------------------------------------------------------------
+- name: Check if oneadmin_kvm SELinux module is already active
+  ansible.builtin.shell: semodule -l | grep -q '^oneadmin_kvm\b'
+  register: selinux_mod_check
+  failed_when: false
+  changed_when: false
+
+- name: Deploy custom oneadmin_kvm SELinux policy definition
+  ansible.builtin.template:
+    src: ../templates/oneadmin_kvm.te.j2
+    dest: /var/tmp/oneadmin_kvm.te
+    owner: root
+    group: root
+    mode: '0600'
+  register: te_file
+
+- name: Compile SELinux policy module (.mod)
+  ansible.builtin.command: checkmodule -M -m -o /var/tmp/oneadmin_kvm.mod /var/tmp/oneadmin_kvm.te
+  when: te_file.changed or selinux_mod_check.rc != 0
+  changed_when: true
+
+- name: Package SELinux policy module (.pp)
+  ansible.builtin.command: semodule_package -o /var/tmp/oneadmin_kvm.pp -m /var/tmp/oneadmin_kvm.mod
+  when: te_file.changed or selinux_mod_check.rc != 0
+  changed_when: true
+
+- name: Install compiled SELinux policy package into kernel
+  ansible.builtin.command: semodule -i /var/tmp/oneadmin_kvm.pp
+  when: te_file.changed or selinux_mod_check.rc != 0
+  changed_when: true
+
+- name: Clean up temporary compilation artifacts
+  ansible.builtin.file:
+    path: "{{ item }}"
+    state: absent
+  loop:
+    - /var/tmp/oneadmin_kvm.te
+    - /var/tmp/oneadmin_kvm.mod
+    - /var/tmp/oneadmin_kvm.pp
+  when: te_file.changed or selinux_mod_check.rc != 0

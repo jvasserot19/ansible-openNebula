@@ -1,0 +1,28 @@
+# To onboard all new nodes defined in the [new_nodes] group:
+ansible-playbook -i inventory.ini playbooks/03_onboard_node.yml --limit new_nodes --ask-vault-pass
+
+# Or to onboard a single specific bare-metal server:
+ansible-playbook -i inventory.ini playbooks/03_onboard_node.yml --limit kvm03.internal.lan --ask-vault-pass
+
+
+Target Hosts: Defined in new_nodes
+
+Execution Flow:
+
+Validates that hardware virtualization (vmx or svm) is exposed in the CPU flags.
+
+Replaces repo files with local 10.4.16.21 sources and synchronizes time via Chrony.
+
+Installs opennebula-node-kvm, openvswitch, and ovn-host.
+
+Mounts the shared NFS datastore (10.4.16.21:/data/datastores) to /var/lib/one/datastores.
+
+Fetches the oneadmin public key from fe01 and injects it into /var/lib/one/.ssh/authorized_keys on the hypervisor.
+
+Configures OVS integration bridges and sets OVN chassis parameters (ovn-remote="tcp:10.4.16.10:6642" pointing to the VIP).
+
+Delegates to the active frontend to run onehost create <hostname> -i kvm -m kvm -c default.
+
+Triggers onehost sync <hostname> to push hypervisor monitoring probes and driver scripts.
+
+Polls onehost show until the node transitions from INIT to MONITORED.

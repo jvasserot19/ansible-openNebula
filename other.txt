@@ -1,0 +1,34 @@
+A. The 3 Frontend VMs Themselves
+The Ansible playbooks configure the OS after the VM is already running; they do not construct the VM hardware definitions. In an airgapped setup with only 2 initial hypervisors, those 3 frontend VMs are provisioned through one of three methods:
+
+Manual / Kickstart Install: You create 3 guest VMs using virt-install or the standard KVM hypervisor CLI on your 2 existing physical nodes, booting off an AlmaLinux minimal ISO hosted on your local HTTP server ([http://10.4.16.21/isos/AlmaLinux-9-minimal.iso](http://10.4.16.21/isos/AlmaLinux-9-minimal.iso)).
+
+Cloned Gold Master: A single minimal AlmaLinux VM is created on kvm01, generalized, and cloned into 3 disks with static IPs assigned (10.4.16.11, 10.4.16.12, 10.4.16.13).
+
+PXE / TFTP: If your local network runs an internal PXE server, the VMs boot over the network, execute a Kickstart file, and shut down ready for Ansible management.
+
+-----------------------
+
+B. Tenant VM Images inside OpenNebula (Workloads)
+In standard internet-connected environments, OpenNebula pulls appliances dynamically from the public OpenNebula Marketplace. In an airgapped environment, that marketplace is unreachable.
+
+To add AlmaLinux images for tenant workloads:
+
+Download the official KVM generic cloud image on an internet-connected workstation:
+
+File: AlmaLinux-9-GenericCloud-latest.x86_64.qcow2
+
+Copy the file into your airgapped environment and host it on your local web server:
+
+Path: [http://10.4.16.21/images/AlmaLinux-9-GenericCloud.qcow2](http://10.4.16.21/images/AlmaLinux-9-GenericCloud.qcow2)
+
+Register the image into OpenNebula's image datastore using an Ansible task or CLI command:
+
+Bash
+su - oneadmin -c "oneimage create \
+  --name 'AlmaLinux-9' \
+  --path 'http://10.4.16.21/images/AlmaLinux-9-GenericCloud.qcow2' \
+  --type OS \
+  --driver qcow2 \
+  --prefix vd \
+  --datastore default"

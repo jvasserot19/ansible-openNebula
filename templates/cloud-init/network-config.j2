@@ -1,0 +1,11 @@
+version: 2
+ethernets:
+  eth0:
+    match:
+      name: "en*"
+    addresses:
+      - {{ item.ip }}/{{ netmask }}
+    gateway4: {{ gateway_ip }}
+    nameservers:
+      addresses:
+        - {{ dns_ip }}

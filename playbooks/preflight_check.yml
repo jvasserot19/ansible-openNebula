@@ -1,0 +1,71 @@
+---
+- name: Pre-Flight Verification for KVM Hypervisors
+  hosts: baremetal_hosts
+  gather_facts: true
+  vars:
+    required_disk_gb: 120
+    test_bridge: "br0"
+    repo_server_ip: "10.4.16.21"
+    nfs_export_path: "/data/datastores"
+
+  tasks:
+    # 1. CPU Virtualization Flag Check
+    - name: Verify hardware virtualization (VT-x / AMD-V) is enabled in BIOS
+      ansible.builtin.shell: egrep -c '(vmx|svm)' /proc/cpuinfo
+      register: vcpu_flags
+      changed_when: false
+      failed_when: vcpu_flags.stdout | int == 0
+
+    # 2. Network Bridge Interface Check
+    - name: Verify network bridge interface exists
+      ansible.builtin.command: "ip link show {{ test_bridge }}"
+      register: bridge_check
+      changed_when: false
+      failed_when: bridge_check.rc != 0
+
+    # 3. Storage Capacity Check
+    - name: Gather target disk mount storage facts
+      ansible.builtin.setup:
+        filter: ansible_mounts
+
+    - name: Verify adequate free disk space exists under /var/lib/libvirt
+      ansible.builtin.assert:
+        that:
+          - (item.size_available / 1024 / 1024 / 1024) | int >= required_disk_gb
+        fail_msg: >-
+          Mount {{ item.mount }} has only {{ (item.size_available / 1024 / 1024 / 1024) | int }} GB available.
+          At least {{ required_disk_gb }} GB is required to allocate disks for the frontend VMs.
+        success_msg: "Mount {{ item.mount }} has sufficient free space."
+      loop: "{{ ansible_mounts }}"
+      when: item.mount == '/var' or item.mount == '/'
+      run_once: false
+
+    # 4. Internal HTTP Mirror Reachability
+    - name: Verify HTTP repo server is reachable
+      ansible.builtin.uri:
+        url: "http://{{ repo_server_ip }}/repos/baseos/"
+        method: HEAD
+        status_code: [200, 301, 302, 403]
+        timeout: 5
+      register: repo_reachability
+
+    # 5. Internal NFS Port Accessibility
+    - name: Verify NFS export server port (2049) is open
+      ansible.builtin.wait_for:
+        host: "{{ repo_server_ip }}"
+        port: 2049
+        state: started
+        timeout: 5
+
+    # 6. Check for VM Name Collisions
+    - name: Query existing Libvirt domains
+      ansible.builtin.command: virsh list --all --name
+      register: libvirt_domains
+      changed_when: false
+
+    - name: Assert no conflicting VM names exist on hypervisor
+      ansible.builtin.assert:
+        that:
+          - item.name not in libvirt_domains.stdout_lines
+        fail_msg: "A VM named '{{ item.name }}' already exists on {{ inventory_hostname }}."
+      loop: "{{ assigned_vms }}"

@@ -1,0 +1,150 @@
+---
+- name: Deploy and Configure OpenNebula 3-Node HA Frontends
+  hosts: one_frontends
+  gather_facts: true
+  tasks:
+    - name: Apply airgapped repo definitions
+      ansible.builtin.include_tasks: tasks/setup_repos.yml
+
+    - name: Install OpenNebula Frontend, Sunstone, and Keepalived
+      ansible.builtin.dnf:
+        name:
+          - opennebula
+          - opennebula-sunstone
+          - opennebula-tools
+          - opennebula-gate
+          - opennebula-flow
+          - keepalived
+          - python3-PyMySQL
+        state: present
+
+    - name: Generate FIPS-compliant ECDSA SSH keypair for oneadmin
+      ansible.builtin.user:
+        name: oneadmin
+        generate_ssh_key: true
+        ssh_key_type: ecdsa
+        ssh_key_bits: 384
+        ssh_key_file: .ssh/id_ecdsa
+      run_once: true
+      delegate_to: "{{ groups['one_frontends'][0] }}"
+
+    # -------------------------------------------------------------------------
+    # Synchronize Cluster Authentication Tokens & oneadmin SSH Keys
+    # -------------------------------------------------------------------------
+    - name: Fetch primary one_auth token from fe01
+      ansible.builtin.slurp:
+        src: /var/lib/one/.one/one_auth
+      delegate_to: "{{ groups['one_frontends'][0] }}"
+      run_once: true
+      register: primary_one_auth
+
+    - name: Sync one_auth to all frontends
+      ansible.builtin.copy:
+        dest: /var/lib/one/.one/one_auth
+        content: "{{ primary_one_auth.content | b64decode }}"
+        owner: oneadmin
+        group: oneadmin
+        mode: '0600'
+
+    - name: Fetch primary oneadmin SSH keypair from fe01
+      ansible.builtin.slurp:
+        src: "/var/lib/one/.ssh/{{ item }}"
+      loop:
+        - id_rsa
+        - id_rsa.pub
+      delegate_to: "{{ groups['one_frontends'][0] }}"
+      run_once: true
+      register: fe_ssh_keys
+
+    - name: Sync oneadmin SSH keys across all frontends
+      ansible.builtin.copy:
+        dest: "/var/lib/one/.ssh/{{ item.item }}"
+        content: "{{ item.content | b64decode }}"
+        owner: oneadmin
+        group: oneadmin
+        mode: "{{ '0600' if item.item == 'id_rsa' else '0644' }}"
+      loop: "{{ fe_ssh_keys.results }}"
+
+    # -------------------------------------------------------------------------
+    # Configure oned.conf for HA & Centralized MariaDB
+    # -------------------------------------------------------------------------
+    - name: Configure database backend in oned.conf
+      ansible.builtin.blockinfile:
+        path: /etc/one/oned.conf
+        marker: "# {mark} ANSIBLE MANAGED DB BLOCK"
+        block: |
+          DB = [
+            BACKEND = "mysql",
+            SERVER  = "{{ db_host }}",
+            USER    = "{{ db_user }}",
+            PASSWD  = "{{ db_password }}",
+            DB_NAME = "opennebula"
+          ]
+
+    - name: Configure Raft HA in oned.conf
+      ansible.builtin.blockinfile:
+        path: /etc/one/oned.conf
+        marker: "# {mark} ANSIBLE MANAGED RAFT BLOCK"
+        block: |
+          FEDERATION = [
+            MODE = "STANDALONE",
+            ZONE_ID = 0,
+            SERVER_ID = {{ server_id }},
+            MASTER_ONED = ""
+          ]
+          HA = [
+            SERVER_ID = {{ server_id }}
+          ]
+
+    # -------------------------------------------------------------------------
+    # Keepalived Virtual IP (VIP) Setup for Frontend Floating Endpoint
+    # -------------------------------------------------------------------------
+    - name: Configure Keepalived VIP instance
+      ansible.builtin.copy:
+        dest: /etc/keepalived/keepalived.conf
+        content: |
+          vrrp_instance VI_ONE {
+              state BACKUP
+              interface eth0
+              virtual_router_id 51
+              priority {{ keepalived_priority }}
+              advert_int 1
+              virtual_ipaddress {
+                  {{ one_ha_vip }}/24
+              }
+          }
+      notify: Restart Keepalived
+
+    - name: Ensure OpenNebula and Keepalived services are enabled
+      ansible.builtin.service:
+        name: "{{ item }}"
+        state: started
+        enabled: true
+      loop:
+        - opennebula
+        - opennebula-sunstone
+        - keepalived
+
+  handlers:
+    - name: Restart Keepalived
+      ansible.builtin.service:
+        name: keepalived
+        state: restarted
+
+
+# -------------------------------------------------------------------------
+    # Network Initialization
+    # -------------------------------------------------------------------------
+    - name: Ensure oned daemon is responsive before creating resources
+      ansible.builtin.shell: |
+        su - oneadmin -c "oneuser show"
+      register: oned_check
+      retries: 10
+      delay: 5
+      until: oned_check.rc == 0
+      changed_when: false
+      run_once: true
+      delegate_to: "{{ groups['one_frontends'][0] }}"
+
+    - name: Import and register OpenNebula Virtual Networks
+      ansible.builtin.include_tasks: tasks/register_vnets.yml

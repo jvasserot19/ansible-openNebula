@@ -1,0 +1,22 @@
+ansible-playbook -i inventory.ini playbooks/02_deploy_frontends.yml --ask-vault-pass
+
+
+Target Hosts: one_frontends (fe01, fe02, fe03)
+
+Execution Flow:
+
+Installs OpenNebula server packages, Sunstone UI, Keepalived, and ovn-central.
+
+Generates one_auth and the oneadmin SSH keypair on fe01, then securely copies both across to fe02 and fe03 so all frontends share identity.
+
+Edits /etc/one/oned.conf on each node, injecting the matching SERVER_ID (0, 1, 2) and setting the DB backend to 127.0.0.1 (connecting to the local Galera node).
+
+Mounts the shared NFS datastore /var/lib/one/datastores from 10.4.16.21.
+
+Starts Keepalived, binding the floating Virtual IP (10.4.16.10) to the primary frontend.
+
+Starts oned, opennebula-sunstone, and ovn-northd.
+
+Waits for oneuser show to return success (confirming the daemon is healthy).
+
+Checks existing virtual networks, renders vnet.net.j2 templates, and executes onevnet create for both the Tenant-OVN-VXLAN and Tenant-OVS-VXLAN networks.

@@ -1,0 +1,21 @@
+ansible-playbook -i inventory.ini playbooks/01_deploy_galera.yml --ask-vault-pass
+
+Target Hosts: one_frontends (fe01, fe02, fe03)
+
+Execution Flow:
+
+Configures internal mirrors from 10.4.16.21 and disables default internet repos.
+
+Installs mariadb-server, galera, rsync, and Python drivers.
+
+Configures firewall rules for MySQL client connections (3306) and Galera replication (4567, 4568, 4444).
+
+Deploys /etc/my.cnf.d/galera.cnf pointing all nodes to each other via gcomm://.
+
+Runs galera_new_cluster only on fe01 to create the cluster sequence number.
+
+Starts mariadb on fe02 and fe03 sequentially to let them join fe01 via State Snapshot Transfer (SST).
+
+Connects to MariaDB, creates the opennebula database schema, and provisions the oneadmin DB user using the encrypted password.
+
+Queries SHOW STATUS LIKE 'wsrep_cluster_size' and asserts that the returned value is 3.
