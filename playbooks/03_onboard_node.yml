@@ -1,4 +1,7 @@
 ---
+# =============================================================================
+# playbooks/03_onboard_node.yml - Day-2 OpenNebula KVM Hypervisor Onboarding
+# =============================================================================
 - name: Onboard New KVM Nodes into Cluster
   hosts: new_nodes
   gather_facts: true
@@ -8,6 +11,7 @@
     # -------------------------------------------------------------------------
     - name: Apply airgapped repo definitions
       ansible.builtin.include_tasks: ../tasks/setup_repos.yml
+      tags: [repos, system]
 
     - name: Install OpenNebula KVM, OVS, OVN, and policy utilities
       ansible.builtin.dnf:
@@ -20,10 +24,23 @@
           - NetworkManager-ovs
           - policycoreutils-python-utils
           - fapolicyd
+          - audit
         state: present
+      tags: [packages, system]
 
     # -------------------------------------------------------------------------
-    # 2. SELinux Booleans & Policies (Step 1)
+    # 2. Hardening & Host Security Safeguards
+    # -------------------------------------------------------------------------
+    - name: Configure Libvirt QEMU driver for oneadmin DAC alignment
+      ansible.builtin.include_tasks: ../tasks/configure_qemu_ownership.yml
+      tags: [libvirt, security]
+
+    - name: Configure auditd filter rules to prevent probe disk exhaustion
+      ansible.builtin.include_tasks: ../tasks/configure_auditd_filters.yml
+      tags: [auditd, security]
+
+    # -------------------------------------------------------------------------
+    # 3. SELinux Booleans & Policy Module (Step 1)
     # -------------------------------------------------------------------------
     - name: Enable virtualization SELinux booleans
       ansible.posix.seboolean:
@@ -31,40 +48,59 @@
         state: true
         persistent: true
       loop:
-        - virt_use_nfs                 # Allows svirt_t (KVM VMs) to access NFS datastores
-        - virt_use_fusefs              # Allows access to FUSE filesystems if used
-        - virt_sandbox_use_all_caps    # Allows guest processes needed capabilities
-        - virt_sandbox_use_net         # Permits virtual machine networking
+        - virt_use_nfs
+        - virt_use_fusefs
+        - virt_sandbox_use_all_caps
+        - virt_sandbox_use_net
+      tags: [selinux, security]
 
     - name: Build and load custom oneadmin_kvm SELinux policy
       ansible.builtin.include_tasks: ../tasks/configure_selinux_kvm.yml
+      tags: [selinux, security]
+
     # -------------------------------------------------------------------------
-    # 3. Mount NFS Shared Datastores
+    # 4. Mount NFS Shared Datastores
     # -------------------------------------------------------------------------
     - name: Configure and mount shared NFS datastores
       ansible.builtin.include_tasks: ../tasks/mount_nfs.yml
+      tags: [storage, nfs]
 
     # -------------------------------------------------------------------------
-    # 4. SELinux File Contexts & Relabeling (Step 2)
+    # 5. SELinux File Contexts & Relabeling (Step 2)
     # -------------------------------------------------------------------------
     - name: Set persistent SELinux file context for datastores
       community.general.sefcontext:
         target: '/var/lib/one/datastores(/.*)?'
         setype: virt_image_t
         state: present
+      tags: [selinux, security]
 
     - name: Set persistent SELinux file context for oneadmin SSH keys
       community.general.sefcontext:
         target: '/var/lib/one/\.ssh(/.*)?'
         setype: ssh_home_t
         state: present
+      tags: [selinux, security]
 
     - name: Apply SELinux context changes immediately
       ansible.builtin.command: restorecon -Rv /var/lib/one
       changed_when: false
+      tags: [selinux, security]
 
     # -------------------------------------------------------------------------
-    # 5. Application Whitelisting & SSH Security Configuration
+    # 6. Open vSwitch & OVN Host Configuration
+    # -------------------------------------------------------------------------
+    - name: Enable and start Open vSwitch
+      ansible.builtin.service:
+        name: openvswitch
+        state: started
+        enabled: true
+
+    - name: Configure 100G backplane and set OVN chassis encapsulation
+      ansible.builtin.include_tasks: ../tasks/configure_backplane_ovn.yml
+
+    # -------------------------------------------------------------------------
+    # 7. Application Whitelisting & SSH Security Configuration
     # -------------------------------------------------------------------------
     - name: Deploy OpenNebula execution trust rules for fapolicyd
       ansible.builtin.copy:
@@ -77,10 +113,12 @@
         group: root
         mode: '0644'
       notify: Restart fapolicyd
+      tags: [fapolicyd, security]
 
     - name: Update fapolicyd trust database
       ansible.builtin.command: fapolicyd-cli --update
       changed_when: false
+      tags: [fapolicyd, security]
 
     - name: Deploy SSH exception for oneadmin internal automation
       ansible.builtin.copy:
@@ -96,15 +134,17 @@
         group: root
         mode: '0600'
       notify: Reload SSHD
+      tags: [ssh, security]
 
     # -------------------------------------------------------------------------
-    # 6. Open vSwitch & OVN Host Configuration
+    # 8. Open vSwitch & OVN Host Configuration
     # -------------------------------------------------------------------------
     - name: Enable and start Open vSwitch
       ansible.builtin.service:
         name: openvswitch
         state: started
         enabled: true
+      tags: [network, ovs]
 
     - name: Open UDP VXLAN/Geneve tunnel ports in firewalld
       ansible.posix.firewalld:
@@ -113,9 +153,10 @@
         state: enabled
         immediate: true
       loop:
-        - "4789/udp"  # VXLAN tunnel port
-        - "6081/udp"  # OVN Geneve tunnel port
+        - "4789/udp"
+        - "6081/udp"
       ignore_errors: true
+      tags: [network, firewall]
 
     - name: Configure OVN local chassis parameters
       ansible.builtin.shell: |
@@ -124,46 +165,64 @@
         ovs-vsctl set open_vswitch . external_ids:ovn-remote="tcp:{{ one_ha_vip }}:6642"
         ovs-vsctl set open_vswitch . external_ids:system-id={{ inventory_hostname }}
       changed_when: false
+      tags: [network, ovn]
 
     - name: Enable and start OVN host controller
       ansible.builtin.service:
         name: ovn-controller
         state: started
         enabled: true
+      tags: [network, ovn]
 
     - name: Ensure libvirtd service is active
       ansible.builtin.service:
         name: libvirtd
         state: started
         enabled: true
+      tags: [libvirt]
 
     # -------------------------------------------------------------------------
-    # 7. SSH Key Trust & Cluster Registration
+    # 9. SSH Key Trust & Cluster Registration
     # -------------------------------------------------------------------------
     - name: Fetch frontend oneadmin public key
       ansible.builtin.slurp:
         src: /var/lib/one/.ssh/id_rsa.pub
       delegate_to: "{{ groups['one_frontends'][0] }}"
       register: fe_oneadmin_pubkey
+      tags: [cluster, ssh]
 
     - name: Authorize frontend oneadmin key on hypervisor
       ansible.posix.authorized_key:
         user: oneadmin
         state: present
         key: "{{ fe_oneadmin_pubkey.content | b64decode }}"
+      tags: [cluster, ssh]
 
     - name: Register host in OpenNebula via Primary Frontend
       ansible.builtin.shell: |
-        su - oneadmin -c "onehost list --csv | grep -q '^{{ inventory_hostname }},' || onehost create {{ inventory_hostname }} -i kvm -m kvm -c {{ one_cluster_name }}"
+        su - oneadmin -c "onehost list --csv | awk -F',' 'NR>1 {print $4}' | grep -qx '{{ inventory_hostname }}' || onehost create {{ inventory_hostname }} -i kvm -m kvm -c {{ one_cluster_name }}"
       delegate_to: "{{ groups['one_frontends'][0] }}"
       register: host_add
       changed_when: "'onehost create' in host_add.cmd"
+      tags: [cluster]
 
     - name: Synchronize drivers to hypervisor
       ansible.builtin.shell: |
         su - oneadmin -c "onehost sync {{ inventory_hostname }}"
       delegate_to: "{{ groups['one_frontends'][0] }}"
       changed_when: true
+      tags: [cluster]
+
+    - name: Wait for OpenNebula monitoring probes to return active state
+      ansible.builtin.shell: |
+        su - oneadmin -c "onehost show {{ inventory_hostname }} | grep -E '^STATE\s+:\s+MONITORED'"
+      delegate_to: "{{ groups['one_frontends'][0] }}"
+      register: host_state
+      retries: 10
+      delay: 5
+      until: host_state.rc == 0
+      changed_when: false
+      tags: [cluster]
 
   # ---------------------------------------------------------------------------
   # Handlers

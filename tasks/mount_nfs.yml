@@ -1,29 +1,56 @@
 ---
+# =============================================================================
+# tasks/mount_nfs.yml - OpenNebula Shared Datastore Mount
+# =============================================================================
+
+- name: Verify NFS storage host is reachable on port 2049
+  ansible.builtin.wait_for:
+    host: "{{ nfs_server_ip }}"
+    port: 2049
+    state: started
+    timeout: 5
+  tags:
+    - storage
+    - nfs
+
 - name: Install NFS client utilities
   ansible.builtin.dnf:
     name: nfs-utils
     state: present
+  tags:
+    - storage
+    - nfs
 
-- name: Ensure target datastore mount directory exists
+- name: Ensure target datastore mount directory exists prior to mounting
   ansible.builtin.file:
     path: "{{ nfs_mount_target }}"
     state: directory
     owner: oneadmin
     group: oneadmin
     mode: '0755'
+  tags:
+    - storage
+    - nfs
 
-- name: Mount shared NFS datastore to /var/lib/one/datastores and update fstab
+- name: Mount shared NFS datastore and persist in /etc/fstab
   ansible.posix.mount:
     path: "{{ nfs_mount_target }}"
     src: "{{ nfs_server_ip }}:{{ nfs_export_path }}"
     fstype: nfs
     opts: "{{ nfs_mount_options }}"
     state: mounted
+  tags:
+    - storage
+    - nfs
 
-- name: Enforce oneadmin ownership on mounted datastore directory
+- name: Enforce oneadmin ownership on root of mounted datastore
   ansible.builtin.file:
     path: "{{ nfs_mount_target }}"
     state: directory
     owner: oneadmin
     group: oneadmin
+    mode: '0755'
     recurse: false
+  tags:
+    - storage
+    - nfs

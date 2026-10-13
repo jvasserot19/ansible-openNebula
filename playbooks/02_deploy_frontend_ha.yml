@@ -1,12 +1,20 @@
 ---
+# =============================================================================
+# playbooks/02_deploy_frontend_ha.yml - 3-Node OpenNebula HA Frontend & Core
+# =============================================================================
 - name: Deploy and Configure OpenNebula 3-Node HA Frontends
   hosts: one_frontends
   gather_facts: true
   tasks:
-    - name: Apply airgapped repo definitions
-      ansible.builtin.include_tasks: tasks/setup_repos.yml
 
-    - name: Install OpenNebula Frontend, Sunstone, and Keepalived
+    # -------------------------------------------------------------------------
+    # 1. Base Repositories & Package Installation
+    # -------------------------------------------------------------------------
+    - name: Apply airgapped repo definitions
+      ansible.builtin.include_tasks: ../tasks/setup_repos.yml
+      tags: [repos, system]
+
+    - name: Install OpenNebula Frontend, Sunstone, Keepalived, and dependencies
       ansible.builtin.dnf:
         name:
           - opennebula
@@ -16,9 +24,48 @@
           - opennebula-flow
           - keepalived
           - python3-PyMySQL
+          - nfs-utils
         state: present
+      tags: [packages, system]
 
-    - name: Generate FIPS-compliant ECDSA SSH keypair for oneadmin
+    - name: Allow OpenNebula, Sunstone, and VRRP traffic through firewalld
+      ansible.posix.firewalld:
+        port: "{{ item }}"
+        permanent: true
+        state: enabled
+        immediate: true
+      loop:
+        - "2616/tcp"   # oned XML-RPC API
+        - "9869/tcp"   # Sunstone Web UI
+        - "29876/tcp"  # OneGate token API
+        - "5030/tcp"   # OneFlow service API
+      ignore_errors: true
+      tags: [firewall, security]
+
+    - name: Allow Keepalived VRRP protocol in firewalld
+      ansible.posix.firewalld:
+        protocol: vrrp
+        permanent: true
+        state: enabled
+        immediate: true
+      ignore_errors: true
+      tags: [firewall, security]
+
+    # -------------------------------------------------------------------------
+    # 2. Shared NFS Datastore & OVN Central Deployment
+    # -------------------------------------------------------------------------
+    - name: Mount shared NFS datastores on frontend nodes
+      ansible.builtin.include_tasks: ../tasks/mount_nfs.yml
+      tags: [storage, nfs]
+
+    - name: Deploy OVN central databases on frontend nodes
+      ansible.builtin.include_tasks: ../tasks/setup_ovn_central.yml
+      tags: [network, ovn]
+
+    # -------------------------------------------------------------------------
+    # 3. Synchronize Cluster Tokens & FIPS ECDSA Keys
+    # -------------------------------------------------------------------------
+    - name: Generate FIPS-compliant ECDSA SSH keypair for oneadmin on primary node
       ansible.builtin.user:
         name: oneadmin
         generate_ssh_key: true
@@ -27,48 +74,76 @@
         ssh_key_file: .ssh/id_ecdsa
       run_once: true
       delegate_to: "{{ groups['one_frontends'][0] }}"
+      tags: [auth, ssh]
 
-    # -------------------------------------------------------------------------
-    # Synchronize Cluster Authentication Tokens & oneadmin SSH Keys
-    # -------------------------------------------------------------------------
+    - name: Ensure .one and .ssh directories exist on all frontends
+      ansible.builtin.file:
+        path: "/var/lib/one/{{ item }}"
+        state: directory
+        owner: oneadmin
+        group: oneadmin
+        mode: '0700'
+      loop:
+        - .one
+        - .ssh
+      tags: [auth, ssh]
+
     - name: Fetch primary one_auth token from fe01
       ansible.builtin.slurp:
         src: /var/lib/one/.one/one_auth
       delegate_to: "{{ groups['one_frontends'][0] }}"
       run_once: true
       register: primary_one_auth
+      tags: [auth]
 
-    - name: Sync one_auth to all frontends
+    - name: Sync one_auth across all frontends
       ansible.builtin.copy:
         dest: /var/lib/one/.one/one_auth
         content: "{{ primary_one_auth.content | b64decode }}"
         owner: oneadmin
         group: oneadmin
         mode: '0600'
+      tags: [auth]
 
-    - name: Fetch primary oneadmin SSH keypair from fe01
+    - name: Fetch primary oneadmin ECDSA SSH keypair from fe01
       ansible.builtin.slurp:
         src: "/var/lib/one/.ssh/{{ item }}"
       loop:
-        - id_rsa
-        - id_rsa.pub
+        - id_ecdsa
+        - id_ecdsa.pub
       delegate_to: "{{ groups['one_frontends'][0] }}"
       run_once: true
       register: fe_ssh_keys
+      tags: [auth, ssh]
 
-    - name: Sync oneadmin SSH keys across all frontends
+    - name: Sync oneadmin ECDSA SSH keys across all frontends
       ansible.builtin.copy:
         dest: "/var/lib/one/.ssh/{{ item.item }}"
         content: "{{ item.content | b64decode }}"
         owner: oneadmin
         group: oneadmin
-        mode: "{{ '0600' if item.item == 'id_rsa' else '0644' }}"
+        mode: "{{ '0600' if item.item == 'id_ecdsa' else '0644' }}"
       loop: "{{ fe_ssh_keys.results }}"
+      tags: [auth, ssh]
+
+    - name: Authorize oneadmin public key on all frontends
+      ansible.posix.authorized_key:
+        user: oneadmin
+        state: present
+        key: "{{ fe_ssh_keys.results[1].content | b64decode }}"
+      tags: [auth, ssh]
 
     # -------------------------------------------------------------------------
-    # Configure oned.conf for HA & Centralized MariaDB
+    # 4. Configure oned.conf for Galera & Raft HA
     # -------------------------------------------------------------------------
-    - name: Configure database backend in oned.conf
+    - name: Disable default SQLite backend in oned.conf
+      ansible.builtin.replace:
+        path: /etc/one/oned.conf
+        regexp: '(?m)^(\s*DB\s*=\s*\[\s*BACKEND\s*=\s*"sqlite".*?\])'
+        replace: '# \1'
+      tags: [config, opennebula]
+
+    - name: Configure centralized MariaDB backend in oned.conf
       ansible.builtin.blockinfile:
         path: /etc/one/oned.conf
         marker: "# {mark} ANSIBLE MANAGED DB BLOCK"
@@ -78,10 +153,11 @@
             SERVER  = "{{ db_host }}",
             USER    = "{{ db_user }}",
             PASSWD  = "{{ db_password }}",
-            DB_NAME = "opennebula"
+            DB_NAME = "{{ db_name | default('opennebula') }}"
           ]
+      tags: [config, opennebula]
 
-    - name: Configure Raft HA in oned.conf
+    - name: Configure Raft HA consensus parameters in oned.conf
       ansible.builtin.blockinfile:
         path: /etc/one/oned.conf
         marker: "# {mark} ANSIBLE MANAGED RAFT BLOCK"
@@ -95,11 +171,12 @@
           HA = [
             SERVER_ID = {{ server_id }}
           ]
+      tags: [config, opennebula]
 
     # -------------------------------------------------------------------------
-    # Keepalived Virtual IP (VIP) Setup for Frontend Floating Endpoint
+    # 5. Keepalived Virtual IP (VIP) Setup
     # -------------------------------------------------------------------------
-    - name: Configure Keepalived VIP instance
+    - name: Configure Keepalived VRRP instance
       ansible.builtin.copy:
         dest: /etc/keepalived/keepalived.conf
         content: |
@@ -113,38 +190,47 @@
                   {{ one_ha_vip }}/24
               }
           }
+        owner: root
+        group: root
+        mode: '0644'
       notify: Restart Keepalived
+      tags: [keepalived]
 
-    - name: Ensure OpenNebula and Keepalived services are enabled
+    - name: Ensure OpenNebula and Keepalived daemons are enabled and started
       ansible.builtin.service:
         name: "{{ item }}"
         state: started
         enabled: true
       loop:
+        - keepalived
         - opennebula
         - opennebula-sunstone
-        - keepalived
+      tags: [services]
 
-  handlers:
-    - name: Restart Keepalived
-      ansible.builtin.service:
-        name: keepalived
-        state: restarted
-
-
-# -------------------------------------------------------------------------
-    # Network Initialization
     # -------------------------------------------------------------------------
-    - name: Ensure oned daemon is responsive before creating resources
+    # 6. Core Daemon Validation & Virtual Network Registration
+    # -------------------------------------------------------------------------
+    - name: Ensure oned core daemon is fully initialized and responsive
       ansible.builtin.shell: |
         su - oneadmin -c "oneuser show"
       register: oned_check
-      retries: 10
+      retries: 12
       delay: 5
       until: oned_check.rc == 0
       changed_when: false
       run_once: true
       delegate_to: "{{ groups['one_frontends'][0] }}"
+      tags: [verify, network]
 
     - name: Import and register OpenNebula Virtual Networks
-      ansible.builtin.include_tasks: tasks/register_vnets.yml
+      ansible.builtin.include_tasks: ../tasks/register_vnets.yml
+      tags: [network, vnet]
+
+  # ---------------------------------------------------------------------------
+  # Handlers
+  # ---------------------------------------------------------------------------
+  handlers:
+    - name: Restart Keepalived
+      ansible.builtin.service:
+        name: keepalived
+        state: restarted

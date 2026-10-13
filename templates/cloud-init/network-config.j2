@@ -2,10 +2,13 @@ version: 2
 ethernets:
   eth0:
     match:
-      name: "en*"
+      name: "e*"
+    set-name: eth0
     addresses:
-      - {{ item.ip }}/{{ netmask }}
-    gateway4: {{ gateway_ip }}
+      - "{{ item.ip }}/{{ netmask }}"
+    routes:
+      - to: default
+        via: "{{ gateway_ip }}"
     nameservers:
       addresses:
-        - {{ dns_ip }}
+        - "{{ dns_ip }}"
